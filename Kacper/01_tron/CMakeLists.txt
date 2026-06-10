@@ -1,0 +1,1 @@
+idf_component_register(SRCS "main.c" "Transmitter.c" "Receiver.c" INCLUDE_DIRS ".")
