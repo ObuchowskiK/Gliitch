@@ -1,0 +1,6 @@
+-mlongcalls
+-fno-builtin-memcpy
+-fno-builtin-memset
+-fno-builtin-bzero
+-mdisable-hardware-atomics
+"-specs=C:/Users/obuch/Desktop/KONSOLA/Gliitch/Pablo/esp_now_tests/build/specs/picolibc.specs"
