@@ -1,4 +1,4 @@
-idf_component_register(SRCS "main.c" "athletics.c"
+idf_component_register(SRCS "main.c" "athletics.c" "agario.c" "blackjack.c"
                     INCLUDE_DIRS "."
                     REQUIRES esp_wifi nvs_flash esp_lcd driver esp_timer)
 

@@ -17,7 +17,8 @@
 #include "esp_timer.h"
 #include "esp_random.h"
 #include "athletics.h"
-
+#include "agario.h"
+#include "blackjack.h"
 // --- PEANUT-GB EMULATOR DEFINES ---
 #define ENABLE_SOUND 0
 #define ENABLE_LCD   1
@@ -60,7 +61,7 @@ static const char *TAG = "MAIN_SYS";
 // --- System State Machine ---
 typedef enum {
     STATE_MAIN_MENU,
-    STATE_GAME_BRICKS,   
+    STATE_GAME_AGARIO,   
     STATE_GAME_TRON,
     STATE_HAXBALL_LOBBY, 
     STATE_GAME_HAXBALL,  
@@ -68,7 +69,8 @@ typedef enum {
     STATE_GAME_GB,
     STATE_GAME_TOWER,
     STATE_ATHLETICS_MENU,
-    STATE_GAME_ATHLETICS  
+    STATE_GAME_ATHLETICS,
+    STATE_GAME_BLACKJACK,  
 } console_state_t;
 
 console_state_t current_state = STATE_MAIN_MENU;
@@ -153,6 +155,9 @@ float tw_auto_scroll = 0.5f;
 bool tw_game_over = true;
 int tw_winner_id = -1;
 int tw_highest_score = 0;
+
+static bj_state_t g_blackjack;
+static bool bj_initialized = false;
 
 // --- Global Variables ---
 QueueHandle_t xGamepadQueue = NULL;
@@ -616,6 +621,8 @@ void vGameLogicTask(void *pvParameters) {
         uint32_t bg_val32 = ((uint32_t)MATTE_CHARCOAL << 16) | MATTE_CHARCOAL;
         if (current_state == STATE_GAME_HAXBALL || current_state == STATE_HAXBALL_LOBBY)
             bg_val32 = (((uint32_t)GRASS_GREEN << 16) | GRASS_GREEN);
+        if (current_state == STATE_GAME_BLACKJACK)
+            bg_val32 = (((uint32_t)SWAP16(0x0840) << 16) | SWAP16(0x0840));
         for (int i = 0; i < (LCD_H_RES * LCD_V_RES) / 2; i++) pCanvas32[i] = bg_val32;
 
         while (xQueueReceive(xGamepadQueue, &input_payload, 0) == pdTRUE) {
@@ -631,12 +638,12 @@ void vGameLogicTask(void *pvParameters) {
                     if (xTaskGetTickCount() - last_menu_move > pdMS_TO_TICKS(200)) {
                         if (input_payload.joy_y > 3000) {
                             if (menu_mode == 0) menu_selection = (menu_selection + 1) % 2;
-                            else games_selection = (games_selection + 1) % 6;
+                            else games_selection = (games_selection + 1) % 7;
                             last_menu_move = xTaskGetTickCount();
                         }
                         if (input_payload.joy_y < 1000) {
                             if (menu_mode == 0) menu_selection = (menu_selection - 1 + 2) % 2;
-                            else games_selection = (games_selection - 1 + 6) % 6;
+                            else games_selection = (games_selection - 1 + 7) % 7;
                             last_menu_move = xTaskGetTickCount();
                         }
                     }
@@ -646,7 +653,7 @@ void vGameLogicTask(void *pvParameters) {
                             if (menu_selection == 0) { menu_mode = 1; games_selection = 0; }
                             else { current_state = STATE_PAD_SETTINGS; }
                         } else {
-                            if (games_selection == 0) current_state = STATE_GAME_BRICKS;
+                            if (games_selection == 0) { agario_init(); current_state = STATE_GAME_AGARIO; }
                             else if (games_selection == 1) { 
                                 pTronGrid = heap_caps_malloc(TRON_W * TRON_H, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
                                 reset_tron_round(); current_state = STATE_GAME_TRON; 
@@ -654,7 +661,13 @@ void vGameLogicTask(void *pvParameters) {
                             else if (games_selection == 2) { for (int i = 0; i < MAX_PLAYERS; i++) hb_teams[i] = -1; current_state = STATE_HAXBALL_LOBBY; }
                             else if (games_selection == 3) { reset_tower_round(); current_state = STATE_GAME_TOWER; }
                             else if (games_selection == 4) { if (gb_init_emulator()) current_state = STATE_GAME_GB;}
-                            else if (games_selection == 5) { menu_selection = 0; ath_btn_last_state = true; ath_white_last_state = true; current_state = STATE_ATHLETICS_MENU;} 
+                            else if (games_selection == 5) { menu_selection = 0; ath_btn_last_state = true; ath_white_last_state = true; current_state = STATE_ATHLETICS_MENU;}
+                            else if (games_selection == 6) { bool active_arr[MAX_PLAYERS];
+                                for (int i = 0; i < MAX_PLAYERS; i++) active_arr[i] = players[i].is_active;
+                                bj_init(&g_blackjack, active_arr);
+                                bj_initialized = true;
+                                current_state = STATE_GAME_BLACKJACK;
+                            } 
                         }
                     }
                     if (input_payload.buttons & (1 << 3)) { menu_mode = 0; }
@@ -770,14 +783,31 @@ void vGameLogicTask(void *pvParameters) {
                     }
                 }
 
-                // ---- BRICKS ----
-                else if (current_state == STATE_GAME_BRICKS) {
-                    if (input_payload.joy_x < 1500) players[idx].x -= 3;
-                    if (input_payload.joy_x > 2500) players[idx].x += 3;
-                    if (input_payload.joy_y < 1500) players[idx].y -= 3;
-                    if (input_payload.joy_y > 2500) players[idx].y += 3;
-                    if (p_id == leader_player_id && (input_payload.buttons & (1 << 3)))
+                // ---- Agario ----
+                else if (current_state == STATE_GAME_AGARIO) {
+                    bool exit = agario_process_input(p_id, input_payload.joy_x, input_payload.joy_y,
+                                     input_payload.buttons, (p_id == leader_player_id));
+                    if (exit) current_state = STATE_MAIN_MENU;
+                }
+
+                // ---- BLACKJACK INPUT ----
+                else if (current_state == STATE_GAME_BLACKJACK) {
+                    bool active_arr[MAX_PLAYERS];
+                    for (int i = 0; i < MAX_PLAYERS; i++) active_arr[i] = players[i].is_active;
+                    bool exit = bj_process_input(
+                        &g_blackjack,
+                        p_id,
+                        input_payload.joy_x,
+                        input_payload.joy_y,
+                        input_payload.buttons,
+                        (p_id == leader_player_id),
+                        active_arr,
+                        xTaskGetTickCount()
+                    );
+                    if (exit) {
+                        bj_initialized = false;
                         current_state = STATE_MAIN_MENU;
+                    }
                 }
 
                 // ---- POKEMON GB ----
@@ -902,15 +932,16 @@ void vGameLogicTask(void *pvParameters) {
                         canvas_draw_text(pCurrentDrawCanvas, 160, 50, "GAMES", NEON_PINK, 3);
 
                         const char *games[] = {
-                            "PABLO BRICKS",
+                            "AGARIO",
                             "SQUARE TRON",
                             "GLIITCH BALL",
                             "ICY TOWER 4P",
                             "POKEMON GB",
-                            "ATHLETICS"
+                            "ATHLETICS",
+                            "BLACKJACK"
                         };
 
-                        int total_games = 6;
+                        int total_games = 7;
                         int visible_items = 4;
 
                         int scroll_offset = 0;
@@ -983,6 +1014,18 @@ void vGameLogicTask(void *pvParameters) {
             }
             uint32_t now_ms = xTaskGetTickCount() * portTICK_PERIOD_MS;
             athletics_render(pCurrentDrawCanvas, now_ms, is_active_arr, colors_arr);
+        }
+
+        // ---- BLACKJACK ----
+        else if (current_state == STATE_GAME_BLACKJACK) {
+            bool active_arr[MAX_PLAYERS];
+            uint16_t colors_arr[MAX_PLAYERS];
+            for (int i = 0; i < MAX_PLAYERS; i++) {
+                active_arr[i]  = players[i].is_active;
+                colors_arr[i]  = players[i].color;
+            }
+            bj_update(&g_blackjack, xTaskGetTickCount(), active_arr);
+            bj_render(&g_blackjack, pCurrentDrawCanvas,active_arr, colors_arr);
         }
 
         // ---- ICY TOWER ----
@@ -1353,18 +1396,18 @@ void vGameLogicTask(void *pvParameters) {
         }
 
         // ---- BRICKS ----
-        else if (current_state == STATE_GAME_BRICKS) {
-            for (int p = 0; p < MAX_PLAYERS; p++) {
-                if (players[p].is_active) {
-                    for (int row = players[p].y; row < (players[p].y + BOX_SIZE); row++) {
-                        for (int col = players[p].x; col < (players[p].x + BOX_SIZE); col++) {
-                            if (col >= 0 && col < LCD_H_RES && row >= 0 && row < LCD_V_RES)
-                                pCurrentDrawCanvas[row * LCD_H_RES + col] = players[p].color;
-                        }
-                    }
-                }
+        else if (current_state == STATE_GAME_AGARIO) {
+            bool is_active_arr[MAX_PLAYERS];
+            uint16_t colors_arr[MAX_PLAYERS];
+            for (int i = 0; i < MAX_PLAYERS; i++) {
+                is_active_arr[i] = players[i].is_active;
+                colors_arr[i]    = players[i].color;
             }
+            agario_update_and_render(pCurrentDrawCanvas, xTaskGetTickCount(),is_active_arr, colors_arr);
         }
+
+    
+
 
         // ---- POKEMON GB ----
         else if (current_state == STATE_GAME_GB) {
@@ -1512,9 +1555,8 @@ void app_main(void) {
     ESP_ERROR_CHECK(esp_wifi_set_channel(1, WIFI_SECOND_CHAN_NONE));
     ESP_ERROR_CHECK(esp_now_init());
     ESP_ERROR_CHECK(esp_now_register_recv_cb(on_esp_now_recv));
-
-    xTaskCreatePinnedToCore(vDisplayRenderTask, "GFX_Render",    4096, NULL, 6, NULL, 1);
-    xTaskCreatePinnedToCore(vGameLogicTask,     "Game_Engine",   8192, NULL, 5, NULL, 0);
-    xTaskCreate(vSystemMonitorTask,             "System_Monitor", 2048, NULL, 4, NULL);
+    xTaskCreatePinnedToCore(vDisplayRenderTask,"GFX_Render",    4096, NULL, 6, NULL, 1);
+    xTaskCreatePinnedToCore(vGameLogicTask,"Game_Engine",   8192, NULL, 5, NULL, 0);
+    xTaskCreate(vSystemMonitorTask,"System_Monitor", 2048, NULL, 4, NULL);
     ESP_LOGI(TAG, "All processes deployed successfully.");
 }
